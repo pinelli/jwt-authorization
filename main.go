@@ -1,90 +1,108 @@
 package main
 
+// using asymmetric crypto/RSA keys
+
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/dgrijalva/jwt-go"
+	"log"
 	"net/http"
-	"os"
-
-	"github.com/auth0-community/auth0"
-	"github.com/gorilla/handlers"
-	"github.com/gorilla/mux"
-	jose "gopkg.in/square/go-jose.v2"
+	"time"
 )
 
-type Product struct {
-	Id          int
-	Name        string
-	Slug        string
-	Description string
-}
+var hmacSampleSecret = []byte("qwerty")
 
-var products = []Product{
-	Product{Id: 1, Name: "Hover Shooters", Slug: "hover-shooters", Description: "Shoot your way to the top on 14 different hoverboards"},
-	Product{Id: 2, Name: "Ocean Explorer", Slug: "ocean-explorer", Description: "Explore the depths of the sea in this one of a kind underwater experience"},
-	Product{Id: 3, Name: "Dinosaur Park", Slug: "dinosaur-park", Description: "Go back 65 million years in the past and ride a T-Rex"},
-	Product{Id: 4, Name: "Cars VR", Slug: "cars-vr", Description: "Get behind the wheel of the fastest cars in the world."},
-	Product{Id: 5, Name: "Robin Hood", Slug: "robin-hood", Description: "Pick up the bow and arrow and master the art of archery"},
-	Product{Id: 6, Name: "Real World VR", Slug: "real-world-vr", Description: "Explore the seven wonders of the world in VR"},
-}
-
+// setup the handlers and start listening to requests
 func main() {
-	r := mux.NewRouter()
+	http.HandleFunc("/token", TokenHandler)                       //authencticate
+	http.HandleFunc("/resource", authMiddleware(ResourceHandler)) //get the resource
 
-	r.Handle("/", http.FileServer(http.Dir("./views/")))
-	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("./static/"))))
-
-	r.Handle("/products", authMiddleware(ProductsHandler)).Methods("GET")
-	r.Handle("/products/{slug}/feedback", authMiddleware(AddFeedbackHandler)).Methods("POST")
-
-	http.ListenAndServe(":3000", handlers.LoggingHandler(os.Stdout, r))
+	log.Println("Listening to :8080...")
+	http.ListenAndServe(":8080", nil)
 }
 
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		secret := []byte("{YOUR-AUTH0-API-SECRET}")
-		secretProvider := auth0.NewKeyProvider(secret)
-		audience := []string{"{YOUR-AUTH0-API-AUDIENCE}"}
+var ResourceHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	cookie, _ := r.Cookie("token")
+	fmt.Println("Got token: ", cookie.Value)
 
-		configuration := auth0.NewConfiguration(secretProvider, audience, "https://{YOUR-AUTH0-DOMAIN}.auth0.com/", jose.HS256)
-		validator := auth0.NewValidator(configuration)
-
-		token, err := validator.ValidateRequest(r)
-
-		if err != nil {
-			fmt.Println(err)
-			fmt.Println("Token is not valid:", token)
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte("Unauthorized"))
-		} else {
-			next.ServeHTTP(w, r)
-		}
-	})
-}
-
-var ProductsHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	payload, _ := json.Marshal(products)
+	payload, _ := json.Marshal("This is resource!")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(payload))
 })
 
-var AddFeedbackHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	var product Product
-	vars := mux.Vars(r)
-	slug := vars["slug"]
-
-	for _, p := range products {
-		if p.Slug == slug {
-			product = p
-		}
-	}
+var TokenHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	token := signToken()
 
 	w.Header().Set("Content-Type", "application/json")
-	if product.Slug != "" {
-		payload, _ := json.Marshal(product)
-		w.Write([]byte(payload))
-	} else {
-		w.Write([]byte("Product Not Found"))
-	}
+	w.Header().Set("Set-Cookie", "token="+token)
+	resp, _ := json.Marshal("You are authenticated")
+	w.Write(resp)
 })
+
+func signToken() string {
+	// Create a new token object, specifying signing method and the claims
+	// you would like it to contain.
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"foo": "bar",
+		"nbf": time.Now().Unix(),
+	})
+
+	// Sign and get the complete encoded token as a string using the secret
+	tokenString, err := token.SignedString(hmacSampleSecret)
+
+	fmt.Println(tokenString, err)
+	return tokenString
+}
+
+func retrieveClaims(tokenString string) (map[string]interface{}, bool) {
+	// Parse takes the token string and a function for looking up the key. The latter is especially
+	// useful if you use multiple keys for your application.  The standard is to use 'kid' in the
+	// head of the token to identify which key to use, but the parsed token (head and claims) is provided
+	// to the callback, providing flexibility.
+
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Don't forget to validate the alg is what you expect:
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
+		}
+
+		// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
+		return hmacSampleSecret, nil
+	})
+
+	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		fmt.Println("CLAIMS: ", claims["foo"], claims["nbf"])
+		return map[string]interface{}(claims), ok
+	} else {
+		fmt.Println(err)
+		return nil, false
+	}
+}
+
+func authMiddleware(next http.Handler) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, err := r.Cookie("token")
+		if err != nil {
+			fmt.Println(err)
+			sendUnauthorized(w, "Unauthorized. Authenticate via \"/token\"")
+			return
+		}
+
+		_, ok := retrieveClaims(token.Value)
+		if !ok {
+			sendUnauthorized(w, "Unauthorized")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("Unauthorized"))
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func sendUnauthorized(w http.ResponseWriter, msg string) {
+	w.WriteHeader(http.StatusUnauthorized)
+	w.Write([]byte(msg))
+}
