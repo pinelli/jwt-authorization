@@ -73,7 +73,7 @@ func retrieveClaims(tokenString string) (map[string]interface{}, bool) {
 	})
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		fmt.Println("CLAIMS: ", claims["foo"], claims["nbf"])
+		//fmt.Println("CLAIMS: ", claims["foo"], claims["nbf"])
 		return map[string]interface{}(claims), ok
 	} else {
 		fmt.Println(err)
@@ -104,5 +104,6 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 
 func sendUnauthorized(w http.ResponseWriter, msg string) {
 	w.WriteHeader(http.StatusUnauthorized)
-	w.Write([]byte(msg))
+	jsonStr, _ := json.Marshal(msg)
+	w.Write(jsonStr)
 }
